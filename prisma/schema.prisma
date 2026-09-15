@@ -1,0 +1,330 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Enums
+// ────────────────────────────────────────────────────────────────────────
+
+enum Role {
+  SUPER_ADMIN
+  ADMIN
+  SECURITY_OFFICER
+  STUDENT
+}
+
+enum PresenceStatus {
+  OUTSIDE
+  INSIDE
+  SUSPENDED
+}
+
+enum SessionStatus {
+  ACTIVE
+  CONSUMED
+  EXPIRED
+  REVOKED
+}
+
+enum EventType {
+  ENTRY
+  EXIT
+}
+
+enum AlertType {
+  REPEATED_FAILED_SCAN
+  EXPIRED_QR_ATTEMPT
+  REUSED_QR_ATTEMPT
+  INACTIVE_STUDENT_ATTEMPT
+  UNAUTHORIZED_DEVICE
+  SUSPICIOUS_RAPID_SCANS
+  INVALID_STUDENT_IDENTITY
+  IMPOSSIBLE_STATE_TRANSITION
+  DEVICE_DISABLED
+  GATE_DISABLED
+  CONNECTION_PROBLEM
+}
+
+enum AlertSeverity {
+  INFO
+  WARNING
+  HIGH
+  CRITICAL
+}
+
+enum AlertStatus {
+  OPEN
+  ACKNOWLEDGED
+  RESOLVED
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Identity
+// ────────────────────────────────────────────────────────────────────────
+
+// Application user / login identity. A STUDENT-role user is linked 1:1 to a
+// Student record; SECURITY_OFFICER/ADMIN/SUPER_ADMIN users are staff accounts.
+model User {
+  id           String   @id @default(uuid())
+  name         String
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  role         Role
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  student           Student?
+  sessionsScanned   SecuritySession[] @relation("SessionScannedBy")
+  devicesRegistered Device[]          @relation("DeviceRegisteredBy")
+  exitCodesCreated  ExitCode[]        @relation("ExitCodeCreatedBy")
+  auditLogs         AuditLog[]
+  settingsUpdated   SystemSetting[]
+
+  @@index([role])
+  @@map("users")
+}
+
+model Student {
+  id           String   @id @default(uuid())
+  userId       String   @unique @map("user_id")
+  enrollmentNo String   @unique @map("enrollment_no")
+  name         String
+  email        String   @unique
+  phone        String?
+  department   String
+  course       String
+  year         Int
+  semester     Int
+  section      String?
+  photoUrl     String?  @map("photo_url")
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  user         User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  presence     StudentPresence?
+  accessEvents AccessEvent[]
+  qrSessions   SecuritySession[] @relation("SessionCreatedByStudent")
+  alerts       Alert[]
+
+  @@index([department])
+  @@index([enrollmentNo])
+  @@map("students")
+}
+
+// Authoritative "who is inside right now" table — one row per student.
+// This, not the frontend, is the single source of truth for presence.
+model StudentPresence {
+  studentId           String         @id @map("student_id")
+  status              PresenceStatus @default(OUTSIDE)
+  currentEntryEventId String?        @unique @map("current_entry_event_id")
+  enteredAt           DateTime?      @map("entered_at")
+  lastGateId          String?        @map("last_gate_id")
+  updatedAt           DateTime       @updatedAt @map("updated_at")
+
+  student           Student      @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  currentEntryEvent AccessEvent? @relation("CurrentEntryEvent", fields: [currentEntryEventId], references: [id])
+  lastGate          Gate?        @relation(fields: [lastGateId], references: [id])
+
+  @@index([status])
+  @@map("student_presence")
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Gates & Devices
+// ────────────────────────────────────────────────────────────────────────
+
+model Gate {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  location    String?
+  description String?
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  devices          Device[]
+  securitySessions SecuritySession[]
+  accessEvents     AccessEvent[]
+  presenceLastSeen StudentPresence[]
+  alerts           Alert[]
+  exitCodes        ExitCode[]
+
+  @@map("gates")
+}
+
+// A registered scanning device/kiosk. Devices authenticate with
+// `device_identifier` + a secret whose bcrypt hash is stored here — the raw
+// secret is only ever shown once, at registration time.
+model Device {
+  id               String    @id @default(uuid())
+  gateId           String    @map("gate_id")
+  name             String
+  deviceIdentifier String    @unique @map("device_identifier")
+  deviceSecretHash String    @map("device_secret_hash")
+  active           Boolean   @default(true)
+  lastSeenAt       DateTime? @map("last_seen_at")
+  registeredById   String?   @map("registered_by_id")
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  gate             Gate              @relation(fields: [gateId], references: [id], onDelete: Cascade)
+  registeredBy     User?             @relation("DeviceRegisteredBy", fields: [registeredById], references: [id])
+  securitySessions SecuritySession[]
+  accessEvents     AccessEvent[]
+
+  @@index([gateId])
+  @@map("devices")
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Dynamic QR security sessions
+// ────────────────────────────────────────────────────────────────────────
+
+// A short-lived, single-use security session — this is what the QR encodes.
+// It never contains a student identity in the QR payload itself (that stays
+// an opaque signed reference); `createdByStudentId` is the server-side link,
+// resolved only once the officer's device scans and authenticates. The
+// gate/device/scanning-officer fields are null until that scan happens —
+// the student who generates the QR doesn't (and shouldn't) know or choose
+// which gate will end up verifying it.
+model SecuritySession {
+  id                 String        @id @default(uuid())
+  createdByStudentId String        @map("created_by_student")
+  nonceHash          String        @map("nonce_hash")
+  status             SessionStatus @default(ACTIVE)
+  issuedAt           DateTime      @default(now()) @map("issued_at")
+  expiresAt          DateTime      @map("expires_at")
+  gateId             String?       @map("gate_id")
+  deviceId           String?       @map("device_id")
+  scannedByUserId    String?       @map("scanned_by")
+  consumedAt         DateTime?     @map("consumed_at")
+  createdAt          DateTime      @default(now()) @map("created_at")
+
+  createdByStudent Student      @relation("SessionCreatedByStudent", fields: [createdByStudentId], references: [id], onDelete: Cascade)
+  gate             Gate?        @relation(fields: [gateId], references: [id])
+  device           Device?      @relation(fields: [deviceId], references: [id])
+  scannedByUser    User?        @relation("SessionScannedBy", fields: [scannedByUserId], references: [id])
+  accessEvent      AccessEvent?
+
+  @@index([status])
+  @@index([expiresAt])
+  @@index([createdByStudentId])
+  @@map("security_sessions")
+}
+
+// A permanent, reusable QR representing "exit through this gate" — the
+// opposite security shape of a SecuritySession on purpose. It is meant to be
+// displayed on a screen or printed and posted at the exit, scanned by the
+// STUDENT'S OWN device. It carries no student identity and is not
+// single-use; what makes self-service exit safe is (a) the scanning student
+// must be authenticated as themselves and (b) the presence-row lock still
+// rejects a student who is already OUTSIDE — see scan.service.ts::verifyExit.
+model ExitCode {
+  id          String    @id @default(uuid())
+  gateId      String    @map("gate_id")
+  active      Boolean   @default(true)
+  createdById String?   @map("created_by")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  revokedAt   DateTime? @map("revoked_at")
+
+  gate         Gate          @relation(fields: [gateId], references: [id], onDelete: Cascade)
+  createdBy    User?         @relation("ExitCodeCreatedBy", fields: [createdById], references: [id])
+  accessEvents AccessEvent[]
+
+  @@index([gateId])
+  @@index([active])
+  @@map("exit_codes")
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Access events (the immutable ENTRY/EXIT ledger) & audit log
+// ────────────────────────────────────────────────────────────────────────
+
+// Every row is either an ENTRY (always tied to a one-time `session` an
+// officer scanned) or a self-service EXIT (always tied to a permanent
+// `exitCode` the student scanned themselves) — exactly one of
+// `sessionId`/`exitCodeId` is set, never both, never neither.
+model AccessEvent {
+  id              String    @id @default(uuid())
+  studentId       String    @map("student_id")
+  gateId          String    @map("gate_id")
+  deviceId        String?   @map("device_id")
+  sessionId       String?   @unique @map("session_id")
+  exitCodeId      String?   @map("exit_code_id")
+  eventType       EventType @map("event_type")
+  timestamp       DateTime  @default(now())
+  entryEventId    String?   @unique @map("entry_event_id") // for EXIT rows: points back at the matching ENTRY (1 exit per entry)
+  durationSeconds Int?      @map("duration_seconds") // for EXIT rows: computed stay duration
+  metadata        Json?
+
+  student           Student          @relation(fields: [studentId], references: [id])
+  gate              Gate             @relation(fields: [gateId], references: [id])
+  device            Device?          @relation(fields: [deviceId], references: [id])
+  session           SecuritySession? @relation(fields: [sessionId], references: [id])
+  exitCode          ExitCode?        @relation(fields: [exitCodeId], references: [id])
+  entryEvent        AccessEvent?     @relation("EntryExitPair", fields: [entryEventId], references: [id])
+  matchingExitEvent AccessEvent?     @relation("EntryExitPair")
+  currentFor        StudentPresence? @relation("CurrentEntryEvent")
+
+  @@index([studentId, timestamp])
+  @@index([timestamp])
+  @@index([gateId, timestamp])
+  @@map("access_events")
+}
+
+// Append-only. No route/service in this codebase issues UPDATE or DELETE
+// against this table — it exists purely as a forensic trail.
+model AuditLog {
+  id          String   @id @default(uuid())
+  actorUserId String?  @map("actor_user_id")
+  action      String
+  entityType  String   @map("entity_type")
+  entityId    String?  @map("entity_id")
+  timestamp   DateTime @default(now())
+  ipAddress   String?  @map("ip_address")
+  deviceId    String?  @map("device_id")
+  metadata    Json?
+
+  actor User? @relation(fields: [actorUserId], references: [id])
+
+  @@index([timestamp])
+  @@index([entityType, entityId])
+  @@index([actorUserId])
+  @@map("audit_logs")
+}
+
+model SystemSetting {
+  key         String   @id
+  value       Json
+  updatedById String?  @map("updated_by")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  updatedBy User? @relation(fields: [updatedById], references: [id])
+
+  @@map("system_settings")
+}
+
+model Alert {
+  id         String        @id @default(uuid())
+  type       AlertType
+  severity   AlertSeverity
+  studentId  String?       @map("student_id")
+  gateId     String?       @map("gate_id")
+  message    String
+  status     AlertStatus   @default(OPEN)
+  createdAt  DateTime      @default(now()) @map("created_at")
+  resolvedAt DateTime?     @map("resolved_at")
+
+  student Student? @relation(fields: [studentId], references: [id])
+  gate    Gate?    @relation(fields: [gateId], references: [id])
+
+  @@index([status])
+  @@index([severity])
+  @@map("alerts")
+}

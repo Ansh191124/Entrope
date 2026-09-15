@@ -1,0 +1,35 @@
+# dependencies
+node_modules/
+
+# next.js
+.next/
+out/
+
+# production
+build/
+dist/
+
+# env
+.env
+.env.local
+.env.*.local
+
+# prisma
+prisma/dev.db
+
+# logs
+*.log
+npm-debug.log*
+
+# editor
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# testing
+coverage/
+
+# misc
+.DS_Store
+*.tsbuildinfo
+next-env.d.ts
