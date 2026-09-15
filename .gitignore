@@ -33,3 +33,15 @@ coverage/
 .DS_Store
 *.tsbuildinfo
 next-env.d.ts
+
+# mobile (Expo / Android)
+mobile/node_modules/
+mobile/.expo/
+mobile/android/app/build/
+mobile/android/build/
+mobile/android/.gradle/
+mobile/android/local.properties
+mobile/android/**/*.keystore
+mobile/android/**/*.jks
+mobile/.env
+mobile/*.apk
