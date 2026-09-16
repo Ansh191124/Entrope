@@ -1,7 +1,9 @@
 import { defineConfig } from "vitest/config";
 import path from "path";
 
+
 export default defineConfig({
+  base: 'https://github.com/Ansh191124/Entrope.git',
   test: {
     environment: "node",
     globals: true,
