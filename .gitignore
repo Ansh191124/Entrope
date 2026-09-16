@@ -19,8 +19,7 @@ prisma/dev.db
 
 # logs
 *.log
-npm-debug.log*
-
+npm-debug.log*  
 # editor
 .vscode/*
 !.vscode/extensions.json
