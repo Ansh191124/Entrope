@@ -1,5 +1,6 @@
 import { prisma } from "@/server/lib/prisma";
 import { AppError } from "@/server/lib/errors";
+import type { Prisma } from "@prisma/client";
 
 export async function getOccupancySummary() {
   const [inside, totalActive] = await Promise.all([
@@ -38,6 +39,54 @@ export async function getStudentPresence(studentId: string) {
     return { studentId, status: "OUTSIDE" as const, enteredAt: null, lastGate: null };
   }
   return presence;
+}
+
+export interface ListAccessEventsParams {
+  page: number;
+  pageSize: number;
+  search?: string;
+  eventType?: "ENTRY" | "EXIT";
+  gateId?: string;
+}
+
+/**
+ * Full entry/exit log across every student, for staff kiosks/dashboards —
+ * distinct from a single student's own history (getStudentHistory) and from
+ * the admin-only audit trail (which never exposes ENTRY/EXIT events to
+ * SECURITY_OFFICER). Search matches student name or enrollment number.
+ */
+export async function listAccessEvents(params: ListAccessEventsParams) {
+  const search = params.search?.trim();
+  const where: Prisma.AccessEventWhereInput = {
+    ...(params.eventType ? { eventType: params.eventType } : {}),
+    ...(params.gateId ? { gateId: params.gateId } : {}),
+    ...(search
+      ? {
+          student: {
+            OR: [
+              { name: { contains: search, mode: "insensitive" } },
+              { enrollmentNo: { contains: search, mode: "insensitive" } },
+            ],
+          },
+        }
+      : {}),
+  };
+
+  const [total, items] = await Promise.all([
+    prisma.accessEvent.count({ where }),
+    prisma.accessEvent.findMany({
+      where,
+      orderBy: { timestamp: "desc" },
+      skip: (params.page - 1) * params.pageSize,
+      take: params.pageSize,
+      include: {
+        student: { select: { id: true, name: true, enrollmentNo: true, department: true } },
+        gate: { select: { id: true, name: true } },
+      },
+    }),
+  ]);
+
+  return { total, page: params.page, pageSize: params.pageSize, items };
 }
 
 export async function getStudentHistory(studentId: string, page: number, pageSize: number) {

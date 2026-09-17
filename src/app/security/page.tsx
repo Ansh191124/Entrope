@@ -284,6 +284,145 @@ function ExitQrCard({ device }: { device: DeviceConfig }) {
   );
 }
 
+interface AccessLogEvent {
+  id: string;
+  eventType: "ENTRY" | "EXIT";
+  timestamp: string;
+  durationSeconds: number | null;
+  student: { id: string; name: string; enrollmentNo: string; department: string };
+  gate: { id: string; name: string };
+}
+
+function AccessLogCard() {
+  const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [eventType, setEventType] = useState<"" | "ENTRY" | "EXIT">("");
+  const [page, setPage] = useState(1);
+  const [data, setData] = useState<{ items: AccessLogEvent[]; total: number; pageSize: number } | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  // Debounce the search box so we're not firing a request on every keystroke.
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(search.trim()), 300);
+    return () => clearTimeout(timer);
+  }, [search]);
+
+  // Any filter change should reset back to page 1.
+  useEffect(() => {
+    setPage(1);
+  }, [debouncedSearch, eventType]);
+
+  useEffect(() => {
+    const params = new URLSearchParams({ page: String(page), pageSize: "20" });
+    if (debouncedSearch) params.set("search", debouncedSearch);
+    if (eventType) params.set("eventType", eventType);
+
+    let cancelled = false;
+    setLoading(true);
+    apiFetch<{ success: true; items: AccessLogEvent[]; total: number; pageSize: number }>(
+      `/api/presence/events?${params.toString()}`
+    )
+      .then((res) => {
+        if (!cancelled) setData(res);
+      })
+      .catch(() => {
+        // transient — keep showing the last good page
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [page, debouncedSearch, eventType]);
+
+  const totalPages = data ? Math.max(1, Math.ceil(data.total / data.pageSize)) : 1;
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Entry &amp; Exit Log</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center">
+          <Input
+            placeholder="Search by student name or enrollment no."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="sm:max-w-xs"
+          />
+          <div className="flex gap-2">
+            {(["", "ENTRY", "EXIT"] as const).map((option) => (
+              <Button
+                key={option || "ALL"}
+                type="button"
+                size="sm"
+                variant={eventType === option ? "default" : "outline"}
+                onClick={() => setEventType(option)}
+              >
+                {option === "" ? "All" : option}
+              </Button>
+            ))}
+          </div>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-border text-left text-xs uppercase text-muted-foreground">
+                <th className="py-2 pr-4">Time</th>
+                <th className="py-2 pr-4">Student</th>
+                <th className="py-2 pr-4">Enrollment</th>
+                <th className="py-2 pr-4">Gate</th>
+                <th className="py-2">Event</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data?.items.map((event) => (
+                <tr key={event.id} className="border-b border-border last:border-0">
+                  <td className="py-2 pr-4 whitespace-nowrap">{formatTime(event.timestamp)}</td>
+                  <td className="py-2 pr-4">{event.student.name}</td>
+                  <td className="py-2 pr-4">{event.student.enrollmentNo}</td>
+                  <td className="py-2 pr-4">{event.gate.name}</td>
+                  <td className="py-2">
+                    <Badge variant={event.eventType === "ENTRY" ? "success" : "secondary"}>{event.eventType}</Badge>
+                    {event.durationSeconds != null && (
+                      <span className="ml-2 text-xs text-muted-foreground">
+                        {formatDuration(event.durationSeconds)}
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+              {!loading && data && data.items.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="py-6 text-center text-sm text-muted-foreground">
+                    No matching entries.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="mt-4 flex items-center justify-between text-sm">
+          <span>
+            {data ? `${data.total} total` : loading ? "Loading…" : ""} · Page {page} of {totalPages}
+          </span>
+          <div className="flex gap-2">
+            <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
+              Previous
+            </Button>
+            <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}>
+              Next
+            </Button>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function SecurityOfficerConsole({ device }: { device: DeviceConfig }) {
   const [occupancy, setOccupancy] = useState<{ inside: number; outside: number } | null>(null);
   const [feed, setFeed] = useState<ScanFeedEntry[]>([]);
@@ -332,13 +471,14 @@ function SecurityOfficerConsole({ device }: { device: DeviceConfig }) {
   });
 
   return (
-    <div className="mx-auto grid max-w-5xl gap-6 p-4 sm:p-6 lg:grid-cols-[1.1fr_0.9fr]">
-      <div className="flex flex-col gap-6">
-        <EntryScanCard device={device} />
-        <ExitQrCard device={device} />
-      </div>
+    <div className="mx-auto max-w-5xl space-y-6 p-4 sm:p-6">
+      <div className="grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
+        <div className="flex flex-col gap-6">
+          <EntryScanCard device={device} />
+          <ExitQrCard device={device} />
+        </div>
 
-      <div className="flex flex-col gap-6">
+        <div className="flex flex-col gap-6">
         <Card>
           <CardHeader>
             <CardTitle>Current Occupancy</CardTitle>
@@ -391,7 +531,10 @@ function SecurityOfficerConsole({ device }: { device: DeviceConfig }) {
             )}
           </CardContent>
         </Card>
+        </div>
       </div>
+
+      <AccessLogCard />
     </div>
   );
 }
