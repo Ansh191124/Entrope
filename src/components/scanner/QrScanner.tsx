@@ -28,8 +28,36 @@ export function QrScanner({ onDecoded, onClose, label = "Scan student QR" }: QrS
     let rafId: number;
 
     async function start() {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setError("This browser doesn't support camera access. Try Chrome, Edge, or Safari.");
+        return;
+      }
+
+      // Prefer a rear/environment camera (phones, tablets) but fall back to
+      // whatever camera is available — laptops typically only expose a
+      // single front-facing webcam, which some browsers reject outright if
+      // "environment" is requested as the only option.
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } } });
+      } catch {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        } catch (err) {
+          const name = err instanceof Error ? err.name : "";
+          const message =
+            name === "NotAllowedError"
+              ? "Camera permission was denied. Allow camera access for this site in your browser settings and reload."
+              : name === "NotFoundError"
+                ? "No camera was found on this device."
+                : name === "NotReadableError"
+                  ? "The camera is already in use by another app. Close it and try again."
+                  : "Camera access denied or unavailable. Check the browser's camera permission for this kiosk.";
+          setError(message);
+          return;
+        }
+      }
+
+      try {
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play();

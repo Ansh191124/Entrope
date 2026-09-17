@@ -167,6 +167,10 @@ function EntryScanCard({ device }: { device: DeviceConfig }) {
           {verifying ? "Verifying…" : "SCAN STUDENT QR"}
         </Button>
 
+        {scanning && (
+          <QrScanner onDecoded={handleDecoded} onClose={() => setScanning(false)} label="Scan student entry QR" />
+        )}
+
         {lastResult && (
           <div
             className={`w-full rounded-lg border p-4 ${
